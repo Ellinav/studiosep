@@ -81,28 +81,25 @@ class ConnectionRegistry extends EventEmitter {
     this.logger = logger;
     this.connections = new Set();
     this.messageQueues = new Map();
-    this.heartbeatInterval = null; // 用于存放计时器ID
+    this.heartbeatInterval = null;
   }
 
-  // 新增：心跳检测函数
   _startHeartbeat() {
     this.logger.info("心跳检测机制已启动。");
-    // 清除旧的计时器以防万一
     if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
 
     this.heartbeatInterval = setInterval(() => {
       this.connections.forEach((ws) => {
         if (ws.isAlive === false) {
           this.logger.warn(`检测到僵尸连接，正在终止...`);
-          return ws.terminate(); // 强制终止不响应的连接
+          return ws.terminate();
         }
-        ws.isAlive = false; // 假设它死了，等待pong来证明它活着
-        ws.ping(() => {}); // 发送ping
+        ws.isAlive = false;
+        ws.ping(() => {});
       });
-    }, 30000); // 每30秒检测一次
+    }, 30000);
   }
 
-  // 新增：停止心跳检测
   _stopHeartbeat() {
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
@@ -112,11 +109,10 @@ class ConnectionRegistry extends EventEmitter {
   }
 
   addConnection(websocket, clientInfo) {
-    websocket.isAlive = true; // 初始化时，我们认为它是活的
+    websocket.isAlive = true;
     this.connections.add(websocket);
     this.logger.info(`新客户端连接: ${clientInfo.address}`);
 
-    // 当收到pong时，标记为存活
     websocket.on("pong", () => {
       websocket.isAlive = true;
     });
@@ -130,7 +126,7 @@ class ConnectionRegistry extends EventEmitter {
     );
 
     if (this.connections.size === 1) {
-      this._startHeartbeat(); // 当第一个连接建立时，启动心跳
+      this._startHeartbeat();
     }
     this.emit("connectionAdded", websocket);
   }
@@ -142,13 +138,11 @@ class ConnectionRegistry extends EventEmitter {
     this.messageQueues.clear();
 
     if (this.connections.size === 0) {
-      this._stopHeartbeat(); // 当所有连接都断开时，停止心跳
+      this._stopHeartbeat();
     }
     this.emit("connectionRemoved", websocket);
   }
 
-  // _handleIncomingMessage, hasActiveConnections, getFirstConnection,
-  // createMessageQueue, removeMessageQueue 这些方法保持不变
   _handleIncomingMessage(messageData) {
     try {
       const parsedMessage = JSON.parse(messageData);
@@ -184,14 +178,13 @@ class ConnectionRegistry extends EventEmitter {
   }
 
   getFirstConnection() {
-    // 筛选出真正存活的连接
     const aliveConnections = Array.from(this.connections).filter(
       (ws) => ws.isAlive
     );
     if (aliveConnections.length === 0 && this.connections.size > 0) {
       this.logger.warn("有连接记录，但没有一个通过心跳检测！");
     }
-    return aliveConnections[0]; // 总是返回第一个健康的连接
+    return aliveConnections[0];
   }
 
   createMessageQueue(requestId) {
@@ -220,7 +213,6 @@ class RequestHandler {
   }
 
   async processRequest(req, res) {
-    // 不再检查请求头，而是检查URL查询参数中的'key'字段。
     const clientKey = req.query.key;
 
     if (!clientKey || clientKey !== MY_SECRET_KEY) {
@@ -234,7 +226,6 @@ class RequestHandler {
       );
     }
 
-    // 验证通过，移除URL中的key参数，避免它被发送到Google
     delete req.query.key;
 
     this.logger.info(`代理密码验证通过。处理请求: ${req.method} ${req.path}`);
@@ -310,17 +301,16 @@ class RequestHandler {
   }
 
   async _handlePseudoStreamResponse(proxyRequest, messageQueue, req, res) {
-    // 修复：检查是否为模型列表请求
-    const isModelsRequest = req.path.includes("/models") && req.method === "GET";
+    // 修复：检查是否为流式请求
+    const isStreamRequest = req.path.includes("streamGenerateContent");
     
-    if (isModelsRequest) {
-      // 对于模型列表请求，返回原始JSON
-      this.logger.info("检测到模型列表请求，将返回原始JSON格式");
+    if (!isStreamRequest) {
+      // 对于非流式请求，返回原始JSON
+      this.logger.info("检测到非流式请求，将返回原始JSON格式");
       
       try {
         this._forwardRequest(proxyRequest);
         
-        // 等待浏览器端的响应
         const headerMessage = await messageQueue.dequeue();
         
         if (headerMessage.event_type === "error") {
@@ -330,27 +320,25 @@ class RequestHandler {
           return this._sendErrorResponse(res, headerMessage.status || 500, errorText);
         }
         
-        // 设置响应头（使用原始响应头）
         this._setResponseHeaders(res, headerMessage);
         
-        // 获取完整响应体
         const dataMessage = await messageQueue.dequeue();
         const endMessage = await messageQueue.dequeue();
         
         if (dataMessage.data) {
           res.send(dataMessage.data);
-          this.logger.info("已将模型列表作为原始JSON发送");
+          this.logger.info("已将响应作为原始JSON发送");
         }
         
         if (endMessage.type !== "STREAM_END") {
           this.logger.warn("未收到预期的流结束信号。");
         }
       } catch (error) {
-        this.logger.error(`处理模型列表请求失败: ${error.message}`);
+        this.logger.error(`处理非流式请求失败: ${error.message}`);
         this._sendErrorResponse(res, 500, `代理错误: ${error.message}`);
       }
     } else {
-      // 原有的SSE流式处理逻辑（用于其他请求）
+      // 原有的SSE流式处理逻辑（用于流式请求）
       res.status(200).set({
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
@@ -366,14 +354,11 @@ class RequestHandler {
           }
         }, 1000);
 
-        // --- 移除了服务器端的 for 循环重试 ---
         this.logger.info(`请求已派发给浏览器端处理...`);
         this._forwardRequest(proxyRequest);
 
-        // 等待浏览器端的最终处理结果（成功或失败）
         const lastMessage = await messageQueue.dequeue();
 
-        // 如果浏览器端报告了错误，直接抛出，不再重试
         if (lastMessage.event_type === "error") {
           const errorText = `浏览器端报告错误: ${lastMessage.status || ""} ${
             lastMessage.message || "未知错误"
@@ -401,6 +386,9 @@ class RequestHandler {
   }
 
   async _handleRealStreamResponse(proxyRequest, messageQueue, res) {
+    // 修复：检查是否为流式请求
+    const isStreamRequest = proxyRequest.path.includes("streamGenerateContent");
+    
     let headerMessage;
     for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
       this.logger.info(`请求尝试 #${attempt}/${this.maxRetries}...`);
@@ -430,6 +418,19 @@ class RequestHandler {
         headerMessage.message
       );
     }
+    
+    // 修复：为流式请求添加 Content-Type
+    if (isStreamRequest) {
+      // 确保流式请求有正确的 Content-Type
+      if (!headerMessage.headers || !headerMessage.headers['content-type']) {
+        this.logger.info("为流式请求添加 Content-Type 头");
+        if (!headerMessage.headers) {
+          headerMessage.headers = {};
+        }
+        headerMessage.headers['content-type'] = 'text/event-stream';
+      }
+    }
+    
     this._setResponseHeaders(res, headerMessage);
     this.logger.info("已向客户端发送真实响应头，开始流式传输...");
     try {
@@ -513,17 +514,13 @@ class RequestHandler {
 class ProxyServerSystem extends EventEmitter {
   constructor(config = {}) {
     super();
-    // 端口从环境变量读取，7860是Hugging Face常用的一个默认值
     const PORT = process.env.PORT || 7860;
     this.config = {
-      port: PORT, // 使用动态端口
+      port: PORT,
       host: "0.0.0.0",
-      // SSL证书不再需要
-      // sslKeyPath: "./key.pem",
-      // sslCertPath: "./cert.pem",
       ...config,
     };
-    this.streamingMode = "real";
+    this.streamingMode = "fake";
     this.logger = new LoggingService("ProxyServer");
     this.connectionRegistry = new ConnectionRegistry(this.logger);
     this.requestHandler = new RequestHandler(
@@ -623,7 +620,6 @@ class ProxyServerSystem extends EventEmitter {
   }
 }
 
-// --- Main execution block (无变动) ---
 async function initializeServer() {
   const serverSystem = new ProxyServerSystem();
   try {
