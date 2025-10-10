@@ -209,7 +209,7 @@ class ConnectionRegistry extends EventEmitter {
   }
 }
 
-// --- RequestHandler (无变动) ---
+// --- RequestHandler (修改部分) ---
 class RequestHandler {
   constructor(serverSystem, connectionRegistry, logger) {
     this.serverSystem = serverSystem;
@@ -310,51 +310,93 @@ class RequestHandler {
   }
 
   async _handlePseudoStreamResponse(proxyRequest, messageQueue, req, res) {
-    res.status(200).set({
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-    });
-    this.logger.info("已向客户端发送初始响应头，假流式计时器已启动。");
-    let connectionMaintainer = null;
-    try {
-      const keepAliveChunk = this._getKeepAliveChunk(req);
-      connectionMaintainer = setInterval(() => {
-        if (!res.writableEnded) {
-          res.write(keepAliveChunk);
+    // 修复：检查是否为模型列表请求
+    const isModelsRequest = req.path.includes("/models") && req.method === "GET";
+    
+    if (isModelsRequest) {
+      // 对于模型列表请求，返回原始JSON
+      this.logger.info("检测到模型列表请求，将返回原始JSON格式");
+      
+      try {
+        this._forwardRequest(proxyRequest);
+        
+        // 等待浏览器端的响应
+        const headerMessage = await messageQueue.dequeue();
+        
+        if (headerMessage.event_type === "error") {
+          const errorText = `浏览器端报告错误: ${headerMessage.status || ""} ${
+            headerMessage.message || "未知错误"
+          }`;
+          return this._sendErrorResponse(res, headerMessage.status || 500, errorText);
         }
-      }, 1000);
-
-      // --- 移除了服务器端的 for 循环重试 ---
-      this.logger.info(`请求已派发给浏览器端处理...`);
-      this._forwardRequest(proxyRequest);
-
-      // 等待浏览器端的最终处理结果（成功或失败）
-      const lastMessage = await messageQueue.dequeue();
-
-      // 如果浏览器端报告了错误，直接抛出，不再重试
-      if (lastMessage.event_type === "error") {
-        const errorText = `浏览器端报告错误: ${lastMessage.status || ""} ${
-          lastMessage.message || "未知错误"
-        }`;
-        this._sendErrorChunkToClient(res, errorText);
-        throw new Error(errorText);
+        
+        // 设置响应头（使用原始响应头）
+        this._setResponseHeaders(res, headerMessage);
+        
+        // 获取完整响应体
+        const dataMessage = await messageQueue.dequeue();
+        const endMessage = await messageQueue.dequeue();
+        
+        if (dataMessage.data) {
+          res.send(dataMessage.data);
+          this.logger.info("已将模型列表作为原始JSON发送");
+        }
+        
+        if (endMessage.type !== "STREAM_END") {
+          this.logger.warn("未收到预期的流结束信号。");
+        }
+      } catch (error) {
+        this.logger.error(`处理模型列表请求失败: ${error.message}`);
+        this._sendErrorResponse(res, 500, `代理错误: ${error.message}`);
       }
+    } else {
+      // 原有的SSE流式处理逻辑（用于其他请求）
+      res.status(200).set({
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      });
+      this.logger.info("已向客户端发送初始响应头，假流式计时器已启动。");
+      let connectionMaintainer = null;
+      try {
+        const keepAliveChunk = this._getKeepAliveChunk(req);
+        connectionMaintainer = setInterval(() => {
+          if (!res.writableEnded) {
+            res.write(keepAliveChunk);
+          }
+        }, 1000);
 
-      const dataMessage = await messageQueue.dequeue();
-      const endMessage = await messageQueue.dequeue();
+        // --- 移除了服务器端的 for 循环重试 ---
+        this.logger.info(`请求已派发给浏览器端处理...`);
+        this._forwardRequest(proxyRequest);
 
-      if (dataMessage.data) {
-        res.write(`data: ${dataMessage.data}\n\n`);
-        this.logger.info("已将完整响应体作为SSE事件发送。");
+        // 等待浏览器端的最终处理结果（成功或失败）
+        const lastMessage = await messageQueue.dequeue();
+
+        // 如果浏览器端报告了错误，直接抛出，不再重试
+        if (lastMessage.event_type === "error") {
+          const errorText = `浏览器端报告错误: ${lastMessage.status || ""} ${
+            lastMessage.message || "未知错误"
+          }`;
+          this._sendErrorChunkToClient(res, errorText);
+          throw new Error(errorText);
+        }
+
+        const dataMessage = await messageQueue.dequeue();
+        const endMessage = await messageQueue.dequeue();
+
+        if (dataMessage.data) {
+          res.write(`data: ${dataMessage.data}\n\n`);
+          this.logger.info("已将完整响应体作为SSE事件发送。");
+        }
+        if (endMessage.type !== "STREAM_END") {
+          this.logger.warn("未收到预期的流结束信号。");
+        }
+      } finally {
+        if (connectionMaintainer) clearInterval(connectionMaintainer);
+        if (!res.writableEnded) res.end();
+        this.logger.info("假流式响应处理结束。");
       }
-      if (endMessage.type !== "STREAM_END") {
-        this.logger.warn("未收到预期的流结束信号。");
-      }
-    } finally {
-      if (connectionMaintainer) clearInterval(connectionMaintainer);
-      if (!res.writableEnded) res.end();
-      this.logger.info("假流式响应处理结束。");
     }
   }
 
@@ -481,7 +523,7 @@ class ProxyServerSystem extends EventEmitter {
       // sslCertPath: "./cert.pem",
       ...config,
     };
-    this.streamingMode = "fake";
+    this.streamingMode = "real";
     this.logger = new LoggingService("ProxyServer");
     this.connectionRegistry = new ConnectionRegistry(this.logger);
     this.requestHandler = new RequestHandler(
