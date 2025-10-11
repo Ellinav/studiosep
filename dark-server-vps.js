@@ -12,6 +12,7 @@ const DEFAULT_STREAMING_MODE = "fake";
 const MESSAGE_QUEUE_TIMEOUT_MS = 600000;
 const KEEP_ALIVE_INTERVAL_MS = 1000;
 const WS_HEARTBEAT_INTERVAL_MS = 30000;
+const MAX_MISSED_HEARTBEATS = 3;
 const RETRY_MAX_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 2000;
 
@@ -129,15 +130,20 @@ class ConnectionRegistry extends EventEmitter {
 
   addConnection(websocket, clientInfo) {
     websocket.isAlive = true;
+    websocket.missedHeartbeats = 0;
+
     this.connections.add(websocket);
     this.logger.info(`新客户端连接: ${clientInfo.address}`);
 
     websocket.on("pong", () => {
       websocket.isAlive = true;
+      websocket.missedHeartbeats = 0;
     });
 
     websocket.on("message", (buffer) => {
-      this._handleIncomingMessage(buffer.toString());
+      websocket.isAlive = true;
+      websocket.missedHeartbeats = 0;
+      this._handleIncomingMessage(websocket, buffer.toString());
     });
 
     websocket.on("close", () => this._removeConnection(websocket));
@@ -153,36 +159,45 @@ class ConnectionRegistry extends EventEmitter {
     this.emit("connectionAdded", websocket);
   }
 
-  _handleIncomingMessage(messageData) {
+  _handleIncomingMessage(connection, messageData) {
+    let parsed;
     try {
-      const parsed = JSON.parse(messageData);
-      const { request_id, event_type } = parsed;
-
-      if (!request_id) {
-        this.logger.warn("收到无效消息：缺少 request_id");
-        return;
-      }
-
-      const queue = this.messageQueues.get(request_id);
-      if (!queue) {
-        this.logger.warn(`收到未知请求ID的消息: ${request_id}`);
-        return;
-      }
-
-      switch (event_type) {
-        case "response_headers":
-        case "chunk":
-        case "error":
-          queue.enqueue(parsed);
-          break;
-        case "stream_close":
-          queue.enqueue({ type: "STREAM_END" });
-          break;
-        default:
-          this.logger.warn(`未知的事件类型: ${event_type}`);
-      }
+      parsed = JSON.parse(messageData);
     } catch (error) {
-      this.logger.error(`解析 WebSocket 消息失败: ${error.message}`);
+      this.logger.error(`解析WebSocket消息失败: ${error.message}`);
+      return;
+    }
+
+    const { request_id, event_type } = parsed;
+
+    if (event_type === "client_heartbeat") {
+      connection.isAlive = true;
+      connection.missedHeartbeats = 0;
+      return;
+    }
+
+    if (!request_id) {
+      this.logger.warn("收到无效消息：缺少 request_id");
+      return;
+    }
+
+    const queue = this.messageQueues.get(request_id);
+    if (!queue) {
+      this.logger.warn(`收到未知请求ID的消息: ${request_id}`);
+      return;
+    }
+
+    switch (event_type) {
+      case "response_headers":
+      case "chunk":
+      case "error":
+        queue.enqueue(parsed);
+        break;
+      case "stream_close":
+        queue.enqueue({ type: "STREAM_END" });
+        break;
+      default:
+        this.logger.warn(`未知的事件类型: ${event_type}`);
     }
   }
 
@@ -214,13 +229,33 @@ class ConnectionRegistry extends EventEmitter {
 
     this.heartbeatInterval = setInterval(() => {
       this.connections.forEach((ws) => {
-        if (ws.isAlive === false) {
-          this.logger.warn("检测到僵尸连接，正在终止...");
-          ws.terminate();
+        if (ws.readyState !== WebSocket.OPEN) {
           return;
         }
+
+        if (ws.isAlive === false) {
+          ws.missedHeartbeats = (ws.missedHeartbeats || 0) + 1;
+
+          if (ws.missedHeartbeats >= MAX_MISSED_HEARTBEATS) {
+            this.logger.warn("心跳检测连续失败，正在终止连接...");
+            try {
+              ws.terminate();
+            } catch (error) {
+              this.logger.warn(`终止连接失败: ${error.message}`);
+            }
+            return;
+          }
+        } else {
+          ws.missedHeartbeats = 0;
+        }
+
         ws.isAlive = false;
-        ws.ping(() => {});
+
+        try {
+          ws.ping(() => {});
+        } catch (error) {
+          this.logger.warn(`发送心跳失败: ${error.message}`);
+        }
       });
     }, WS_HEARTBEAT_INTERVAL_MS);
   }
@@ -459,15 +494,10 @@ class RequestHandler {
       }
 
       const payloadMessage = await context.queue.dequeue();
-      const endMessage = await context.queue.dequeue();
+      const endMessage = await context.queue();
 
-      if (payloadMessage?.data) {
-        res.write(`data: ${payloadMessage.data}\n\n`);
-        this.logger.info("已将完整响应体作为SSE事件发送。");
-      }
-
-      if (endMessage?.type !== "STREAM_END") {
-        this.logger.warn("未收到预期的流结束信号。");
+      if:Message.data}\n\n`);
+        this.logger.info已将完整响应体作为SSE事件发送。          ").logger未预期的流结束信号。");
       }
     } finally {
       if (keepAliveTimer) clearInterval(keepAliveTimer);
@@ -517,7 +547,7 @@ class RequestHandler {
   async _handleRealStreamResponse(res, context) {
     const headerMessage = await this._retrieveHeadersWithRetry(context);
 
-    if (headerMessage.event_type === "error") {
+    if (header_type === "error") {
       this._sendErrorResponse(
         res,
         headerMessage.status,
@@ -617,19 +647,7 @@ class RequestHandler {
     }
   }
 
-  _applyResponseHeaders(res, headerMessage) {
-    res.status(headerMessage.status || 200);
-
-    const headers = headerMessage.headers || {};
-    Object.entries(headers).forEach(([name, value]) => {
-      if (name.toLowerCase() !== "content-length") {
-        res.set(name, value);
-      }
-    });
-  }
-
-  _ensureStreamHeaders(headerMessage) {
-    if (!headerMessage.headers) {
+  _applyResponseHeadersheaderMessage.headers) {
       headerMessage.headers = {};
     }
     if (!headerMessage.headers["content-type"]) {
@@ -654,10 +672,7 @@ class RequestHandler {
   _handleProcessingError(error, res) {
     if (res.headersSent) {
       this.logger.error(`请求处理错误 (头已发送): ${error.message}`);
-      if (this.serverSystem.streamingMode === "fake") {
-        this._sendErrorChunk(res, `处理失败: ${error.message}`);
-      }
-      if (!res.writableEnded) {
+      if (.serverModeChunk:      (!ritableEnded) {
         res.end();
       }
       return;
@@ -720,19 +735,12 @@ class ProxyServerSystem extends EventEmitter {
     await new Promise((resolve) => {
       const { port, host } = this.config;
       this.httpServer.listen(port, host, () => {
-        this.logger.info(`HTTP服务器启动: http://${host}:${port}`);
-        this.logger.info(`WS服务器正在监听: ws://${host}:${port}`);
-        resolve();
-      });
-    });
-  }
-
-  _createExpressApp() {
+        this.logger.info(`.infoWS服务器正在监听: ws://${host}:${port {
     const app = express();
 
     app.use(express.json({ limit: "100mb" }));
-    app.use(express.urlencoded({ extended: true, limit: "100mb" }));
-    app.use(express.raw({ type: "*/*", limit: "100mb" }));
+    app.use(express.urlencoded({ extended: true, limit: " }));
+   : "100mb" }));
 
     this._registerAdminRoutes(app);
     this._registerProxyRoutes(app);
@@ -753,7 +761,7 @@ class ProxyServerSystem extends EventEmitter {
 
       const message = '无效的模式。请使用 "fake" 或 "real"。';
       this.logger.warn(message);
-      res.status(400).send(message);
+);
     });
 
     app.get("/admin/get-mode", (_req, res) => {
@@ -782,12 +790,7 @@ class ProxyServerSystem extends EventEmitter {
         return;
       }
 
-      if (req.path === "/favicon.ico") {
-        res.status(204).end();
-        return;
-      }
-
-      this.requestHandler.processRequest(req, res);
+      if (req.pathRequest(req, res);
     });
   }
 
