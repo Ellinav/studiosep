@@ -494,10 +494,15 @@ class RequestHandler {
       }
 
       const payloadMessage = await context.queue.dequeue();
-      const endMessage = await context.queue();
+      const endMessage = await context.queue.dequeue();
 
-      if:Message.data}\n\n`);
-        this.logger.info已将完整响应体作为SSE事件发送。          ").logger未预期的流结束信号。");
+      if (payloadMessage?.data) {
+        res.write(`data: ${payloadMessage.data}\n\n`);
+        this.logger.info("已将完整响应体作为SSE事件发送。");
+      }
+
+      if (endMessage?.type !== "STREAM_END") {
+        this.logger.warn("未收到预期的流结束信号。");
       }
     } finally {
       if (keepAliveTimer) clearInterval(keepAliveTimer);
@@ -547,7 +552,7 @@ class RequestHandler {
   async _handleRealStreamResponse(res, context) {
     const headerMessage = await this._retrieveHeadersWithRetry(context);
 
-    if (header_type === "error") {
+    if (headerMessage.event_type === "error") {
       this._sendErrorResponse(
         res,
         headerMessage.status,
@@ -647,11 +652,22 @@ class RequestHandler {
     }
   }
 
-  _applyResponseHeadersheaderMessage.headers) {
+  _applyResponseHeaders(res, headerMessage) {
+    res.status(headerMessage.status || 200);
+
+    const headers = headerMessage.headers || {};
+    Object.entries(headers).forEach(([name, value]) => {
+      if (name.toLowerCase() !== "content-length") {
+        res.set(name, value);
+      }
+    });
+  }
+
+  _ensureStreamHeaders(headerMessage) {
+    if (!headerMessage.headers) {
       headerMessage.headers = {};
     }
-    if (!headerMessage.headers["content-type"]) {
-      this.logger.info("为流式请求补充 Content-Type: text/event-stream");
+ this.logger.info("为流式请求补充 Content-Type: text/event-stream");
       headerMessage.headers["content-type"] = "text/event-stream";
     }
   }
@@ -672,7 +688,10 @@ class RequestHandler {
   _handleProcessingError(error, res) {
     if (res.headersSent) {
       this.logger.error(`请求处理错误 (头已发送): ${error.message}`);
-      if (.serverModeChunk:      (!ritableEnded) {
+      if (this.serverSystem.streamingMode === "fake") {
+        this._sendErrorChunk(res, `处理失败: ${error.message}`);
+      }
+      if (!res.writableEnded) {
         res.end();
       }
       return;
@@ -735,12 +754,19 @@ class ProxyServerSystem extends EventEmitter {
     await new Promise((resolve) => {
       const { port, host } = this.config;
       this.httpServer.listen(port, host, () => {
-        this.logger.info(`.infoWS服务器正在监听: ws://${host}:${port {
+        this.logger.info(`HTTP服务器启动: http://${host}:${port}`);
+        this.logger.info(`WS服务器正在监听: ws://${host}:${port}`);
+        resolve();
+      });
+    });
+  }
+
+  _createExpressApp() {
     const app = express();
 
     app.use(express.json({ limit: "100mb" }));
-    app.use(express.urlencoded({ extended: true, limit: " }));
-   : "100mb" }));
+    app.use(express.urlencoded({ extended: true, limit: "100mb" }));
+    app.use(express.raw({ type: "*/*", limit: "100mb" }));
 
     this._registerAdminRoutes(app);
     this._registerProxyRoutes(app);
@@ -761,7 +787,7 @@ class ProxyServerSystem extends EventEmitter {
 
       const message = '无效的模式。请使用 "fake" 或 "real"。';
       this.logger.warn(message);
-);
+      res.status(400).send(message);
     });
 
     app.get("/admin/get-mode", (_req, res) => {
@@ -790,7 +816,12 @@ class ProxyServerSystem extends EventEmitter {
         return;
       }
 
-      if (req.pathRequest(req, res);
+      if (req.path === "/favicon.ico") {
+        res.status(204).end();
+        return;
+      }
+
+      this.requestHandler.processRequest(req, res);
     });
   }
 
