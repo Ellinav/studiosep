@@ -667,7 +667,8 @@ class RequestHandler {
     if (!headerMessage.headers) {
       headerMessage.headers = {};
     }
- this.logger.info("为流式请求补充 Content-Type: text/event-stream");
+    if (!headerMessage.headers["content-type"]) {
+      this.logger.info("为流式请求补充 Content-Type: text/event-stream");
       headerMessage.headers["content-type"] = "text/event-stream";
     }
   }
