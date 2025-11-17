@@ -223,7 +223,7 @@ class RequestHandler {
     // 1. 优先检查URL查询参数中的'key'字段 (兼容SillyTavern)
     let clientKey = req.query.key;
 
-    // 2. 如果URL中没有，则检查Authorization header (兼容Cherry Studio等)
+    // 2. 如果URL中没有，则检查Authorization header (标准Bearer Token)
     if (!clientKey) {
       const authHeader = req.headers.authorization;
       if (authHeader && authHeader.startsWith("Bearer ")) {
@@ -231,31 +231,34 @@ class RequestHandler {
       }
     }
 
-    // 3. 执行统一的验证
+    // 3. [新增] 如果还是没有，检查 'x-goog-api-key' header (兼容Cherry Studio)
+    if (!clientKey) {
+      // 注意：header 的 key 都是小写的
+      clientKey = req.headers["x-goog-api-key"];
+    }
+
+    // 4. 执行统一的验证
     if (!clientKey || clientKey !== MY_SECRET_KEY) {
-      // --- [新增调试代码] ---
-      // 记录所有查询参数和请求头，以便找出Cherry Studio到底是如何发送密钥的
+      // (可选) 既然找到问题了，你可以删除下面这 6 行调试日志
       this.logger.warn("--- 调试信息：认证失败 ---");
       this.logger.warn(`请求路径 (Path): ${req.url}`);
       this.logger.warn(`查询参数 (Query): ${JSON.stringify(req.query)}`);
-      // 将headers转换为JSON字符串以便完整打印
       this.logger.warn(
         `请求头 (Headers): ${JSON.stringify(req.headers, null, 2)}`
       );
       this.logger.warn("---------------------------");
-      // --- [调试代码结束] ---
 
       this.logger.warn(
-        `收到一个无效的或缺失的代理密码 (query or header)，已拒绝。请求路径: ${req.url}`
+        `收到一个无效的或缺失的代理密码 (query, auth header, or x-goog-api-key)，已拒绝。请求路径: ${req.url}`
       );
       return this._sendErrorResponse(
         res,
         401,
-        "Unauthorized - Invalid or missing API Key in URL parameter 'key' or 'Authorization: Bearer' header."
+        "Unauthorized - Invalid or missing API Key. Check 'key' param, 'Authorization: Bearer' header, or 'x-goog-api-key' header."
       );
     }
 
-    // 4. 验证通过，如果key在query中，则移除它，避免它被发送到Google
+    // 5. 验证通过，如果key在query中，则移除它，避免它被发送到Google
     if (req.query.key) {
       delete req.query.key;
     }
