@@ -233,6 +233,18 @@ class RequestHandler {
 
     // 3. 执行统一的验证
     if (!clientKey || clientKey !== MY_SECRET_KEY) {
+      // --- [新增调试代码] ---
+      // 记录所有查询参数和请求头，以便找出Cherry Studio到底是如何发送密钥的
+      this.logger.warn("--- 调试信息：认证失败 ---");
+      this.logger.warn(`请求路径 (Path): ${req.url}`);
+      this.logger.warn(`查询参数 (Query): ${JSON.stringify(req.query)}`);
+      // 将headers转换为JSON字符串以便完整打印
+      this.logger.warn(
+        `请求头 (Headers): ${JSON.stringify(req.headers, null, 2)}`
+      );
+      this.logger.warn("---------------------------");
+      // --- [调试代码结束] ---
+
       this.logger.warn(
         `收到一个无效的或缺失的代理密码 (query or header)，已拒绝。请求路径: ${req.url}`
       );
