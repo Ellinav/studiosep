@@ -220,22 +220,33 @@ class RequestHandler {
   }
 
   async processRequest(req, res) {
-    // 不再检查请求头，而是检查URL查询参数中的'key'字段。
-    const clientKey = req.query.key;
+    // 1. 优先检查URL查询参数中的'key'字段 (兼容SillyTavern)
+    let clientKey = req.query.key;
 
+    // 2. 如果URL中没有，则检查Authorization header (兼容Cherry Studio等)
+    if (!clientKey) {
+      const authHeader = req.headers.authorization;
+      if (authHeader && authHeader.startsWith("Bearer ")) {
+        clientKey = authHeader.substring(7); // 提取 "Bearer " 后面的部分
+      }
+    }
+
+    // 3. 执行统一的验证
     if (!clientKey || clientKey !== MY_SECRET_KEY) {
       this.logger.warn(
-        `收到一个无效的或缺失的代理密码，已拒绝。请求路径: ${req.url}`
+        `收到一个无效的或缺失的代理密码 (query or header)，已拒绝。请求路径: ${req.url}`
       );
       return this._sendErrorResponse(
         res,
         401,
-        "Unauthorized - Invalid API Key in URL parameter"
+        "Unauthorized - Invalid or missing API Key in URL parameter 'key' or 'Authorization: Bearer' header."
       );
     }
 
-    // 验证通过，移除URL中的key参数，避免它被发送到Google
-    delete req.query.key;
+    // 4. 验证通过，如果key在query中，则移除它，避免它被发送到Google
+    if (req.query.key) {
+      delete req.query.key;
+    }
 
     this.logger.info(`代理密码验证通过。处理请求: ${req.method} ${req.path}`);
 
